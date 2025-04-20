@@ -1,0 +1,182 @@
+import network
+import socket
+from machine import Pin, ADC
+import dht
+import time
+
+# WiFi Setup
+ssid = "OPPO Reno5"
+password = "carbonfiber"
+
+sta_if = network.WLAN(network.STA_IF)
+sta_if.active(True)
+sta_if.connect(ssid, password)
+
+while not sta_if.isconnected():
+    pass
+
+print("Connected, IP:", sta_if.ifconfig()[0])
+
+# Hardware Setup
+relay_temp = Pin(2, Pin.OUT)
+relay_hum = Pin(15, Pin.OUT)
+relay_soil = Pin(4, Pin.OUT)
+led = Pin(5, Pin.OUT)
+
+dht_sensor = dht.DHT11(Pin(14))
+soil_pin = ADC(Pin(34))
+soil_pin.atten(ADC.ATTN_11DB)
+
+# Default ranges and modes
+temp_min, temp_max = 22, 30
+hum_min, hum_max = 40, 70
+soil_min, soil_max = 1000, 3000
+
+mode_temp = "auto"
+mode_hum = "auto"
+mode_soil = "auto"
+
+def get_soil_level(value):
+    if value > 3000:
+        return "แห้งมาก", "red"
+    elif value > 2000:
+        return "แห้ง", "orange"
+    elif value > 1000:
+        return "ชื้น", "green"
+    else:
+        return "ชื้นมาก", "blue"
+
+def web_page(temp, hum, soil, soil_text, color,
+             temp_min, temp_max, hum_min, hum_max, soil_min, soil_max,
+             relay_states, modes):
+
+    def status(r): return "ON" if r else "OFF"
+
+    html = f"""<!DOCTYPE html>
+<html><head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="5">
+    <title>IOT Control for farming</title>
+</head>
+<body>
+    <h1>Farm Monitor</h1>
+
+    <h2>Sensor Readings</h2>
+    <p>Temperature: {temp}°C</p>
+    <p>Humidity: {hum}%</p>
+    <p>Soil: {soil} ({soil_text})</p>
+    <p style="color:{color}; font-weight:bold;">Soil Status: {soil_text}</p>
+
+    <h2>Relay Status</h2>
+    <p>Temp Relay: {status(relay_states[0])}</p>
+    <p>Humidity Relay: {status(relay_states[1])}</p>
+    <p>Soil Relay: {status(relay_states[2])}</p>
+
+    <h2>Set Control Ranges</h2>
+    <form>
+        <h3>Temperature</h3>
+        <input type="number" name="tmin" value="{temp_min}"> - 
+        <input type="number" name="tmax" value="{temp_max}">
+        <select name="tmode">
+            <option value="auto" {"selected" if modes[0]=="auto" else ""}>Auto</option>
+            <option value="manual_on" {"selected" if modes[0]=="manual_on" else ""}>Manual ON</option>
+            <option value="manual_off" {"selected" if modes[0]=="manual_off" else ""}>Manual OFF</option>
+        </select>
+
+        <h3>Humidity</h3>
+        <input type="number" name="hmin" value="{hum_min}"> - 
+        <input type="number" name="hmax" value="{hum_max}">
+        <select name="hmode">
+            <option value="auto" {"selected" if modes[1]=="auto" else ""}>Auto</option>
+            <option value="manual_on" {"selected" if modes[1]=="manual_on" else ""}>Manual ON</option>
+            <option value="manual_off" {"selected" if modes[1]=="manual_off" else ""}>Manual OFF</option>
+        </select>
+
+        <h3>Soil Moisture</h3>
+        <input type="number" name="smin" value="{soil_min}"> - 
+        <input type="number" name="smax" value="{soil_max}">
+        <select name="smode">
+            <option value="auto" {"selected" if modes[2]=="auto" else ""}>Auto</option>
+            <option value="manual_on" {"selected" if modes[2]=="manual_on" else ""}>Manual ON</option>
+            <option value="manual_off" {"selected" if modes[2]=="manual_off" else ""}>Manual OFF</option>
+        </select><br><br>
+
+        <input type="submit" value="Apply Settings">
+    </form>
+</body></html>"""
+    return html
+
+# Server setup
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(('', 80))
+s.listen(1)
+print("Web Server Started")
+
+while True:
+    conn, addr = s.accept()
+    print("Connection from", addr)
+    request = conn.recv(1024).decode()
+
+    # Parse parameters
+    try:
+        if '?' in request:
+            query = request.split('?', 1)[1].split(' ')[0]
+            params = query.split('&')
+            for param in params:
+                key, value = param.split('=')
+                if key == "tmin": temp_min = int(value)
+                if key == "tmax": temp_max = int(value)
+                if key == "hmin": hum_min = int(value)
+                if key == "hmax": hum_max = int(value)
+                if key == "smin": soil_min = int(value)
+                if key == "smax": soil_max = int(value)
+                if key == "tmode": mode_temp = value
+                if key == "hmode": mode_hum = value
+                if key == "smode": mode_soil = value
+    except Exception as e:
+        print("Param error:", e)
+
+    # Read sensors
+    try:
+        dht_sensor.measure()
+        temp = dht_sensor.temperature()
+        hum = dht_sensor.humidity()
+    except:
+        temp, hum = 0, 0
+
+    soil = soil_pin.read()
+    soil_text, color = get_soil_level(soil)
+
+    # Control relays
+    if mode_temp == "auto":
+        relay_temp.value(1 if temp_min <= temp <= temp_max else 0)
+    elif mode_temp == "manual_on":
+        relay_temp.on()
+    elif mode_temp == "manual_off":
+        relay_temp.off()
+
+    if mode_hum == "auto":
+        relay_hum.value(1 if hum_min <= hum <= hum_max else 0)
+    elif mode_hum == "manual_on":
+        relay_hum.on()
+    elif mode_hum == "manual_off":
+        relay_hum.off()
+
+    if mode_soil == "auto":
+        relay_soil.value(1 if soil_min <= soil <= soil_max else 0)
+    elif mode_soil == "manual_on":
+        relay_soil.on()
+    elif mode_soil == "manual_off":
+        relay_soil.off()
+
+    response = web_page(temp, hum, soil, soil_text, color,
+                        temp_min, temp_max, hum_min, hum_max, soil_min, soil_max,
+                        [relay_temp.value(), relay_hum.value(), relay_soil.value()],
+                        [mode_temp, mode_hum, mode_soil])
+
+    conn.send('HTTP/1.1 200 OK\n')
+    conn.send('Content-Type: text/html\n')
+    conn.send('Connection: close\n\n')
+    conn.sendall(response)
+    conn.close()
+
